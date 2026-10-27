@@ -16,7 +16,7 @@ jobs:
     with:
       platform: windows-latest
       target: x86_64-pc-windows-msvc
-      build-args: "--bundles nsis"
+      build-args: ""
       asset-prefix: "handy-ken"
       upload-artifacts: true
       sign-binaries: false
