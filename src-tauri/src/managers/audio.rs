@@ -1068,6 +1068,12 @@ impl AudioRecordingManager {
 
     /// Cancel any ongoing recording without returning audio samples
     pub fn cancel_recording(&self) {
+        let _ = self.cancel_recording_keep_samples();
+    }
+
+    /// Cancel any ongoing recording, but hand back what was captured so the
+    /// caller can still keep it (Escape saves the take to History).
+    pub fn cancel_recording_keep_samples(&self) -> Option<Vec<f32>> {
         self.invalidate_recording_readiness();
         self.cancel_generation.fetch_add(1, Ordering::AcqRel);
         let mut state = self.state.lock().unwrap();
@@ -1077,9 +1083,10 @@ impl AudioRecordingManager {
                 self.set_state(&mut state, RecordingState::Idle);
                 drop(state);
 
-                if let Some(rec) = self.recorder.lock().unwrap().as_ref() {
-                    let _ = rec.stop(); // Discard the result
-                }
+                let samples = match self.recorder.lock().unwrap().as_ref() {
+                    Some(rec) => rec.stop().ok(),
+                    None => None,
+                };
 
                 *self.is_recording.lock().unwrap() = false;
 
@@ -1091,11 +1098,14 @@ impl AudioRecordingManager {
                         self.stop_microphone_stream();
                     }
                 }
+
+                samples
             }
             RecordingState::Stopping => {
                 debug!("Cancellation requested while recording is stopping");
+                None
             }
-            RecordingState::Idle => {}
+            RecordingState::Idle => None,
         }
     }
 }

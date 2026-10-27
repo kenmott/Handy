@@ -1,8 +1,9 @@
 use crate::managers::audio::AudioRecordingManager;
+use crate::managers::history::HistoryManager;
 use crate::managers::transcription::TranscriptionManager;
 use crate::shortcut;
 use crate::TranscriptionCoordinator;
-use log::info;
+use log::{info, warn};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
@@ -92,7 +93,7 @@ pub fn cancel_current_operation(app: &AppHandle) {
     // Cancel any ongoing recording
     let audio_manager = app.state::<Arc<AudioRecordingManager>>();
     let recording_was_active = audio_manager.is_recording();
-    audio_manager.cancel_recording();
+    let kept_samples = audio_manager.cancel_recording_keep_samples();
 
     // Abandon any live streaming transcription
     let tm = app.state::<Arc<TranscriptionManager>>();
@@ -110,7 +111,94 @@ pub fn cancel_current_operation(app: &AppHandle) {
         coordinator.notify_cancel(recording_was_active);
     }
 
+    // Cancelling never pastes, but what was said is still kept in History.
+    if let Some(samples) = kept_samples {
+        save_cancelled_recording(app, samples);
+    }
+
     info!("Operation cancellation completed - returned to idle state");
+}
+
+/// Transcribe a cancelled take and save it to History without pasting,
+/// unless it is too short or reads as noise rather than speech.
+fn save_cancelled_recording(app: &AppHandle, samples: Vec<f32>) {
+    // Under half a second at 16 kHz is a stray key press, not speech.
+    if samples.len() < 8_000 {
+        info!("Cancelled take too short to keep");
+        return;
+    }
+
+    let ah = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let tm = Arc::clone(&ah.state::<Arc<TranscriptionManager>>());
+        let hm = Arc::clone(&ah.state::<Arc<HistoryManager>>());
+
+        let file_name = format!("handy-{}.wav", chrono::Utc::now().timestamp());
+        let wav_path = hm.recordings_dir().join(&file_name);
+        let samples_for_wav = samples.clone();
+        let wav_saved = matches!(
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::audio_toolkit::save_wav_file(&wav_path, &samples_for_wav)
+            })
+            .await,
+            Ok(Ok(()))
+        );
+
+        let text = match tauri::async_runtime::spawn_blocking(move || tm.transcribe(samples)).await
+        {
+            Ok(Ok(text)) => text,
+            Ok(Err(e)) => {
+                warn!("Could not transcribe cancelled take: {}", e);
+                return;
+            }
+            Err(e) => {
+                warn!("Cancelled take transcription task failed: {}", e);
+                return;
+            }
+        };
+
+        if !looks_like_speech(&text) {
+            info!("Cancelled take discarded: no clear speech");
+            let _ = std::fs::remove_file(hm.recordings_dir().join(&file_name));
+            return;
+        }
+        if !wav_saved {
+            warn!("Cancelled take not saved: audio file could not be written");
+            return;
+        }
+
+        match hm.save_entry(file_name, text, false, None, None) {
+            Ok(_) => info!("Cancelled take saved to History"),
+            Err(e) => warn!("Failed to save cancelled take to History: {}", e),
+        }
+    });
+}
+
+/// True when a transcript reads like real speech: mostly letters, with at
+/// least three words that are not filler.
+pub(crate) fn looks_like_speech(text: &str) -> bool {
+    const FILLER: &[&str] = &[
+        "um", "umm", "uh", "uhh", "uhm", "hmm", "hm", "mm", "mhm", "ah", "er", "eh", "oh", "like",
+        "so", "okay", "ok", "yeah", "the", "and",
+    ];
+
+    let text = text.trim();
+    let visible = text.chars().filter(|c| !c.is_whitespace()).count();
+    let letters = text.chars().filter(|c| c.is_alphabetic()).count();
+    if visible == 0 || letters * 10 < visible * 6 {
+        return false;
+    }
+
+    let real_words = text
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 2)
+        .filter(|w| !FILLER.contains(&w.as_str()))
+        .count();
+    real_words >= 3
 }
 
 /// Check if using the Wayland display server protocol
