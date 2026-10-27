@@ -1,0 +1,23 @@
+name: "Ken Windows Build"
+
+# Builds an unsigned Windows installer of Ken's Handy fork (Escape saves the
+# take to History). Runs on pushes to the fork branch or by hand.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ken/escape-saves-to-history]
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: windows-latest
+      target: x86_64-pc-windows-msvc
+      build-args: "--bundles nsis"
+      asset-prefix: "handy-ken"
+      upload-artifacts: true
+      sign-binaries: false
+    secrets: inherit
