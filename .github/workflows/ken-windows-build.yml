@@ -6,7 +6,7 @@ name: "Ken Windows Build"
 on:
   workflow_dispatch:
   push:
-    branches: [ken/escape-saves-to-history]
+    branches: [ken/escape-v0.10.0]
 
 jobs:
   build:
